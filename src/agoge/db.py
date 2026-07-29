@@ -112,9 +112,31 @@ CREATE TABLE IF NOT EXISTS plan (
     planned_min     REAL,
     status          TEXT DEFAULT 'planned',
     week_start      TEXT,
+    week_of_block   INTEGER,
+    session_type    TEXT,
+    target_hr_low   INTEGER,
+    target_hr_high  INTEGER,
+    segments        TEXT,
+    segments_raw    TEXT,
+    lift_focus      TEXT,
+    notes           TEXT,
+    version         TEXT,
+    import_reason   TEXT,
+    source          TEXT DEFAULT 'weekly',
     created_at      TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_plan_day ON plan(day);
+
+CREATE TABLE IF NOT EXISTS plan_imports (
+    id              INTEGER PRIMARY KEY,
+    version         TEXT NOT NULL UNIQUE,
+    imported_at     TEXT NOT NULL,
+    from_day        TEXT,
+    reason          TEXT,
+    file_name       TEXT,
+    rows_written    INTEGER,
+    rows_skipped    INTEGER
+);
 """
 
 
@@ -131,7 +153,7 @@ class DB:
     def _migrate(self) -> None:
         """CREATE TABLE IF NOT EXISTS will not add columns to a database that
         already exists, so add anything missing by hand. Cheap and idempotent."""
-        for table in ("daily", "sessions", "symptoms"):
+        for table in ("daily", "sessions", "symptoms", "plan"):
             existing = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             wanted = _columns_in_schema(table)
             for col, decl in wanted.items():
@@ -219,7 +241,70 @@ class DB:
                 (day, kind, body, model),
             )
 
+    def upsert_plan_row(self, row: dict[str, Any]) -> None:
+        """Insert or replace a future plan row. Past/logged rows are left alone
+        by the caller — this method only writes what it is given."""
+        cols = [
+            "day", "sport", "title", "detail", "planned_min", "status",
+            "week_start", "week_of_block", "session_type", "target_hr_low",
+            "target_hr_high", "segments", "segments_raw", "lift_focus",
+            "notes", "version", "import_reason", "source",
+        ]
+        data = {c: row.get(c) for c in cols}
+        if isinstance(data.get("segments"), (dict, list)):
+            data["segments"] = json.dumps(data["segments"])
+        data.setdefault("status", "planned")
+        data.setdefault("source", "import")
+        placeholders = ", ".join(f":{c}" for c in cols)
+        with self.tx() as c:
+            # One active prescription per day for imported/weekly plans: drop
+            # existing future-status rows for that day before inserting.
+            c.execute(
+                "DELETE FROM plan WHERE day=? AND status IN ('planned','prescribed')",
+                (data["day"],),
+            )
+            c.execute(
+                f"INSERT INTO plan ({', '.join(cols)}) VALUES ({placeholders})",
+                data,
+            )
+
+    def record_plan_import(self, *, version: str, from_day: str | None,
+                           reason: str, file_name: str,
+                           rows_written: int, rows_skipped: int) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO plan_imports "
+                "(version, imported_at, from_day, reason, file_name, "
+                "rows_written, rows_skipped) VALUES (?,?,?,?,?,?,?)",
+                (version, now_str(), from_day, reason, file_name,
+                 rows_written, rows_skipped),
+            )
+            c.execute(
+                "INSERT INTO events (day, kind, detail, severity) VALUES (?,?,?,?)",
+                (date.today().isoformat(), "plan_import",
+                 f"v={version}; from={from_day or 'all'}; "
+                 f"wrote={rows_written} skipped={rows_skipped}; {reason}",
+                 "info"),
+            )
+
     # ---------- reads ----------
+
+    def plan_for_day(self, day: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM plan WHERE day=? ORDER BY id DESC LIMIT 1", (day,)
+        ).fetchone()
+
+    def plan_between(self, start: str, end: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM plan WHERE day BETWEEN ? AND ? ORDER BY day, id",
+            (start, end),
+        ).fetchall()
+
+    def plan_imports(self, limit: int = 20) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM plan_imports ORDER BY imported_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
 
     def sessions_between(self, start: str, end: str) -> list[sqlite3.Row]:
         return self.conn.execute(

@@ -331,3 +331,84 @@ def sleep_regularity(db: DB, day: str, window: int = 14) -> dict[str, Any]:
         "note": "Descriptive only. Not enough nights to infer anything causal."
                 if len(vals) < 40 else "Descriptive. Effect sizes need an experiment, not a correlation.",
     }
+
+
+# ---------------------------------------------------------------- plan vs reality
+
+def plan_divergence(db: DB, athlete: Athlete, today: date | None = None,
+                    weeks: int = 4) -> dict[str, Any]:
+    """Sustained gap between planned and completed volume, week over week.
+
+    Surfaces in the Sunday review when the current block's targets have stopped
+    matching where the athlete actually is — observation only, not an auto-revision.
+    """
+    today = today or date.today()
+    series = []
+    for back in range(weeks - 1, -1, -1):
+        anchor = today - timedelta(days=7 * back)
+        start, end = week_bounds(anchor)
+        planned_rows = db.plan_between(start, end)
+        planned = sum((r["planned_min"] or 0) for r in planned_rows
+                      if (r["session_type"] or "").lower() != "rest"
+                      and (r["sport"] or "").lower() != "rest")
+        actual = db.weekly_minutes(start, end)
+        pct = (100 * actual / planned) if planned else None
+        series.append({
+            "week_start": start,
+            "planned_min": round(planned, 1),
+            "actual_min": round(actual, 1),
+            "pct_of_plan": round(pct, 1) if pct is not None else None,
+        })
+
+    under = [w for w in series
+             if w["pct_of_plan"] is not None and w["pct_of_plan"] < 80
+             and w["planned_min"] > 0]
+    over = [w for w in series
+            if w["pct_of_plan"] is not None and w["pct_of_plan"] > 120
+            and w["planned_min"] > 0]
+
+    # Consecutive trailing under-weeks
+    streak = 0
+    for w in reversed(series):
+        if w["pct_of_plan"] is not None and w["pct_of_plan"] < 80 and w["planned_min"] > 0:
+            streak += 1
+        else:
+            break
+
+    cps = checkpoint_status(db, athlete, today)
+    early = [c for c in cps if c["on_track"] and c["days_left"] > 14
+             and c["actual"] is not None and c["actual"] >= c["target"]]
+    behind = [c for c in cps if not c["on_track"] and c["days_left"] <= 14]
+
+    message = None
+    if streak >= 3:
+        avg_pct = sum(w["pct_of_plan"] for w in series[-streak:]) / streak
+        message = (
+            f"You've been at {avg_pct:.0f}% of planned volume for {streak} weeks; "
+            f"the current block's targets may not match where you actually are."
+        )
+    elif len(over) >= 3:
+        message = (
+            f"You've been clearing planned volume early for {len(over)} of the "
+            f"last {weeks} weeks — the block may be under-prescribing."
+        )
+    elif behind:
+        message = (
+            "Checkpoint pressure: "
+            + "; ".join(f"{c['metric']} at {c['actual']}/{c['target']} due {c['due']}"
+                        for c in behind)
+        )
+    elif early:
+        message = (
+            "Checkpoints already cleared with time to spare: "
+            + ", ".join(c["metric"] for c in early)
+        )
+
+    return {
+        "weeks": series,
+        "under_weeks": len(under),
+        "over_weeks": len(over),
+        "under_streak": streak,
+        "message": message,
+        "suggest_revision": streak >= 3 or len(over) >= 3,
+    }

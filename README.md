@@ -52,10 +52,16 @@ On a VPS: `ssh root@IP 'bash -s' < deploy/setup_vps.sh`, then install
 
 | Command | What it does |
 |---|---|
-| `agoge status` | Readiness, load headroom, open injury questions, what to do today |
+| `agoge status` | Readiness, load headroom, open injury questions |
+| `agoge today` | What to do today — plan lookup with readiness/injury overrides |
 | `agoge log "..."` | Log anything in plain English — symptoms, weight, prehab, sleep |
 | `agoge nightly` | Pull yesterday from COROS, score it, write the daily note |
 | `agoge weekly` | Sunday review, next week's plan, rebuild the profile |
+| `agoge plan import --file plan.csv --from 2026-08-12 --reason "..."` | Bulk-import a training plan (CSV/xlsx); only future rows overwritten |
+| `agoge plan show` | Upcoming prescribed sessions |
+| `agoge plan history` | Import version stamps and reasons |
+| `agoge plan revision-context` | Export fitness + profile to draft a structural revision |
+| `agoge fitness` | Long-horizon Z2 pace / RHR / HRV / VO2 trend (not daily readiness) |
 | `agoge sessions` | Recent sessions with zone compliance |
 | `agoge checkpoints` | Progress against your phase targets |
 | `agoge physio --since 2026-07-01` | Symptom + load summary to hand a clinician |
@@ -84,8 +90,23 @@ line. That's a feature.
 - `notes` — the daily and weekly prose
 - `plan` — what was prescribed, and whether it happened
 
+## Plan import (Phase 1.5)
+
+Drop a spreadsheet on it — see `examples/plan.example.csv`. Columns:
+`date, week_of_block, sport, session_type, planned_duration_min, target_hr_low,
+target_hr_high, segments, lift_focus, notes`. The `segments` cell holds
+structured sub-workouts as plain text
+(`15min warmup Z1 | 145min steady <160bpm | 20min surge 170-180bpm`).
+
+Re-imports only overwrite dates that haven't happened yet. Each import gets a
+version stamp and a reason. The imported plan is checked against injury and
+load gates — a red gate or a base-only block always outranks the spreadsheet.
+Day-to-day noise (bad sleep, one flare-up) is absorbed by `agoge today`;
+re-import is for structural revisions only.
+
 ## Roadmap
 
+- [x] Structured plan import + long-horizon fitness trend (Phase 1.5)
 - [ ] WhatsApp channel via OpenClaw so `agoge log` becomes a text message
 - [ ] Image and voice ingest over chat (gym console photos, post-run voice notes)
 - [ ] Literature grounding from PubMed with study type and population attached

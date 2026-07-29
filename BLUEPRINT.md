@@ -129,7 +129,7 @@ Everything personal — the filled-in `athlete.yaml` (zones, injury history, rac
 - Energy-availability floor alarm: computed from intake, estimated exercise cost, and fat-free mass; deliberately built to be silent when fine and loud only when under-fuelling risks undermining recovery — never a daily deficit scoreboard
 - Descriptive-only sleep regularity stats (mean, standard deviation, 7-day debt), explicitly labeled as non-causal until a much larger sample exists
 
-### Phase 1.5 — Structured plan import & long-horizon fitness trend **[DESIGNED, not yet built]**
+### Phase 1.5 — Structured plan import & long-horizon fitness trend **[BUILT]**
 
 This phase sits between the core loop and the conversational layer because it extends a table that already exists (`plan`, §5) rather than introducing new architecture — it's closer to "finish the core loop" than "add a new capability."
 
@@ -202,4 +202,4 @@ This phase sits between the core loop and the conversational layer because it ex
 
 ---
 
-*This document describes a system with a working, tested core (Phase 1) and a specified-but-unbuilt roadmap (Phases 2–4). A build-ready blueprint — with exact schemas, prompts, and file-by-file specs for the unbuilt phases — is the natural next artifact once the open questions above are resolved.*
+*This document describes a system with a working, tested core (Phase 1 + Phase 1.5) and a specified-but-unbuilt roadmap (Phases 2–4). A build-ready blueprint — with exact schemas, prompts, and file-by-file specs for the unbuilt phases — is the natural next artifact once the open questions above are resolved.*

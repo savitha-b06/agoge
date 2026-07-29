@@ -213,6 +213,85 @@ def cmd_import(args):
     console.print(f"Stored {len(out['sessions'])} session(s) for {_day(args.date)}")
 
 
+def cmd_today(args):
+    """What do I need to do today — plan + readiness override."""
+    from .plan_today import what_today
+    db, athlete = _ctx()
+    result = what_today(db, athlete, _day(args.date))
+    console.print(f"\n[bold]{athlete.name}[/bold] — {result['day']}")
+    r = result["readiness"]
+    colour = {"green": "green", "amber": "yellow", "red": "red"}[r["flag"]]
+    console.print(f"[{colour}]Readiness {r['score']}/100 ({r['flag']})[/{colour}]")
+    console.print()
+    console.print(result["reply"])
+    if result["conflicts"]:
+        console.print()
+        for c in result["conflicts"]:
+            console.print(f"[yellow]![/yellow] {c['message']}")
+    if args.json:
+        console.print_json(data={
+            k: v for k, v in result.items() if k != "reply"
+        })
+
+
+def cmd_plan(args):
+    from .plan_import import import_plan, revision_context
+    db, athlete = _ctx()
+    if args.action == "import":
+        if not args.file:
+            console.print("[red]Need --file path.csv (or .xlsx)[/red]")
+            sys.exit(2)
+        res = import_plan(
+            db, athlete, args.file,
+            from_day=_day(args.since) if args.since else (
+                _day(args.date) if args.date else None
+            ),
+            reason=args.reason or "",
+            today=_day(args.date) if args.date else None,
+        )
+        console.print(
+            f"[green]Imported[/green] {res['rows_written']} row(s) "
+            f"(skipped {res['rows_skipped']}) as {res['version']}"
+        )
+        console.print(f"  from {res['from_day']}  —  {res['reason']}")
+        for c in res["conflicts"]:
+            console.print(f"[yellow]![/yellow] {c['message']}")
+    elif args.action == "show":
+        start = _day(args.since) if args.since else date.today()
+        end = start + timedelta(days=args.days)
+        t = Table(title=f"Plan {start} → {end}")
+        for col in ("Day", "Sport", "Type", "Min", "HR", "Title", "Ver"):
+            t.add_column(col)
+        for r in db.plan_between(start.isoformat(), end.isoformat()):
+            hr = ""
+            if r["target_hr_low"] or r["target_hr_high"]:
+                hr = f"{r['target_hr_low'] or '—'}-{r['target_hr_high'] or '—'}"
+            t.add_row(
+                r["day"], r["sport"] or "—", r["session_type"] or "—",
+                f"{r['planned_min']:.0f}" if r["planned_min"] else "—",
+                hr or "—", r["title"] or "—", (r["version"] or "—")[-8:],
+            )
+        console.print(t)
+    elif args.action == "history":
+        for r in db.plan_imports():
+            console.print(
+                f"{r['imported_at']}  {r['version']}  "
+                f"from={r['from_day']}  wrote={r['rows_written']}  "
+                f"skipped={r['rows_skipped']}  — {r['reason']}"
+            )
+    elif args.action == "revision-context":
+        console.print(revision_context(db, athlete, _day(args.date)))
+
+
+def cmd_fitness(args):
+    from .fitness import fitness_trend, format_fitness_trend
+    db, athlete = _ctx()
+    trend = fitness_trend(db, athlete, _day(args.date))
+    console.print(format_fitness_trend(trend))
+    if args.json:
+        console.print_json(data=trend)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="agoge", description=f"agoge {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -224,6 +303,9 @@ def main(argv=None):
         return s
 
     add("status", cmd_status, help="Readiness, load, and what to do today")
+
+    s = add("today", cmd_today, help="What do I need to do today? (plan + readiness)")
+    s.add_argument("--json", action="store_true")
 
     s = add("log", cmd_log, help='Log anything: agoge log "knee fine, prehab done, 208lb"')
     s.add_argument("message", nargs="+")
@@ -263,12 +345,27 @@ def main(argv=None):
     s = add("import", cmd_import, help="Import a JSON payload manually")
     s.add_argument("file")
 
+    s = add("plan", cmd_plan, help="Import / show / audit the training plan")
+    s.add_argument("action", choices=["import", "show", "history", "revision-context"])
+    s.add_argument("--file", help="CSV or xlsx path for import")
+    s.add_argument("--since", "--from", dest="since",
+                   help="Only overwrite plan rows on/after this date")
+    s.add_argument("--reason", default="",
+                   help="Why this revision, e.g. behind on volume, cutting 15%%")
+    s.add_argument("--days", type=int, default=21, help="Window for plan show")
+
+    s = add("fitness", cmd_fitness, help="Long-horizon fitness trend (not daily readiness)")
+    s.add_argument("--json", action="store_true")
+
     args = p.parse_args(argv)
     try:
         args.func(args)
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         sys.exit(1)
+    except (ValueError, ImportError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        sys.exit(2)
 
 
 if __name__ == "__main__":

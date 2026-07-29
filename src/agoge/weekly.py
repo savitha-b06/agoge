@@ -4,9 +4,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from .analysis import checkpoint_status, gap_check, injury_flags, load_check, race_status, week_bounds
+from .analysis import (checkpoint_status, gap_check, injury_flags, load_check,
+                       plan_divergence, race_status, week_bounds)
 from .config import Athlete, settings
 from .db import DB
+from .fitness import fitness_trend, format_fitness_trend
 from .llm import complete, load_prompt
 from .profile import read_profile, update_profile
 
@@ -88,6 +90,37 @@ def _weekly_context(db: DB, athlete: Athlete, today: date) -> str:
     for c in checkpoint_status(db, athlete, today):
         lines.append(f"  {c['metric']}: {c['actual']} / {c['target']} due {c['due']} "
                      f"({c['days_left']}d) {'on track' if c['on_track'] else 'BEHIND'}")
+
+    # Long-horizon fitness + sustained plan divergence (Phase 1.5)
+    lines += ["", format_fitness_trend(fitness_trend(db, athlete, today))]
+    div = plan_divergence(db, athlete, today)
+    lines += ["", "Plan vs reality:"]
+    for w in div["weeks"]:
+        pct = f"{w['pct_of_plan']:.0f}%" if w["pct_of_plan"] is not None else "n/a"
+        lines.append(
+            f"  week of {w['week_start']}: planned {w['planned_min']:.0f} min, "
+            f"actual {w['actual_min']:.0f} min ({pct})"
+        )
+    if div["message"]:
+        lines.append(f"  DIVERGENCE: {div['message']}")
+        if div["suggest_revision"]:
+            lines.append(
+                "  Observation only — surface this; do not auto-revise the plan. "
+                "A structural revision needs a deliberate re-import."
+            )
+
+    next_start = (date.fromisoformat(this_end) + timedelta(days=1)).isoformat()
+    next_end = (date.fromisoformat(this_end) + timedelta(days=7)).isoformat()
+    upcoming = db.plan_between(next_start, next_end)
+    if upcoming:
+        lines += ["", "Imported plan for next week (hard gates still apply):"]
+        for p in upcoming:
+            bits = [p["day"], p["sport"] or "?", p["session_type"] or ""]
+            if p["planned_min"]:
+                bits.append(f"{p['planned_min']:.0f}min")
+            if p["title"]:
+                bits.append(p["title"])
+            lines.append("  " + "  ".join(str(b) for b in bits if b))
 
     profile = read_profile()
     lines += ["", "Standing profile:", profile or "(none yet)"]

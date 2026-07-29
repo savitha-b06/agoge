@@ -12,6 +12,9 @@ dependencies = [
   "rich>=13.0.0",
 ]
 
+[project.optional-dependencies]
+xlsx = ["openpyxl>=3.1.0"]
+
 [project.scripts]
 agoge = "agoge.cli:main"
 

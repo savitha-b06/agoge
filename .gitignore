@@ -1,0 +1,19 @@
+# ---------------------------------------------------------------
+# Everything personal lives here and NEVER goes to GitHub.
+# The code is public. The athlete is not.
+# ---------------------------------------------------------------
+data/
+*.db
+*.sqlite3
+athlete.yaml
+.env
+.coros_tokens.json
+exports/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.DS_Store

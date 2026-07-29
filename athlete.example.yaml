@@ -1,0 +1,71 @@
+# Copy to athlete.yaml and fill in your own values.
+# athlete.yaml is gitignored — your health data never leaves your machine.
+
+name: Athlete
+age: 0
+max_hr: 190
+
+zones:
+  z1: [95, 114]
+  z2: [114, 133]
+  z3: [133, 152]
+  z4: [152, 171]
+  z5: [171, 190]
+
+# The zone you are supposed to be in for endurance work.
+# Compliance is scored against this.
+target_endurance_zone: z2
+
+race:
+  name: Example 70.3
+  date: 2027-05-16
+  swim_cutoff_min: 80
+  bike_cutoff_min: 330
+  total_cutoff_min: 510
+
+# Blocks from your roadmap. The agent knows which one today falls in.
+blocks:
+  - name: Base
+    start: 2026-07-28
+    end: 2026-08-25
+    focus: run
+    notes: One job — build the run base.
+
+# Injury gates. These drive the readiness score and the post-session prompts.
+injuries:
+  - key: knee_r
+    label: Right knee (post-ACL)
+    prompt_after: [run, strength]
+    rule: >
+      Mild swelling that resolves within hours is expected. Swelling still
+      present the next morning means the session was too much — back off.
+    escalate_if_days: 2
+  - key: ankle_l
+    label: Left ankle (chronic lateral instability)
+    prompt_after: [run]
+    rule: Any roll or giving-way is logged and escalated immediately.
+    escalate_if_days: 1
+
+prehab:
+  daily: true
+  items: [ankle_alphabet, clamshells, glute_bridges, tib_raises, balance, calf_raises]
+
+nutrition:
+  body_fat_pct: 20
+  weight_lb: 170
+  protein_target_g: 140
+  ea_floor: 30
+
+load:
+  # Max allowed week-over-week increase in total training minutes.
+  max_weekly_ramp_pct: 15
+  # Drop to this fraction of planned volume after a 2-3 day gap.
+  return_from_gap_pct: 70
+
+checkpoints:
+  - due: 2026-08-25
+    metric: long_run_distance_mi
+    target: 3.0
+  - due: 2026-08-25
+    metric: z2_pace_mph
+    target: 4.2

@@ -1,0 +1,22 @@
+# agoge — crontab for the agoge user.  Install with: crontab -e
+# Times are server time. Set the box to your timezone first:
+#   sudo timedatectl set-timezone America/Chicago
+# and change it when you move to Madrid and Tokyo.
+
+AGOGE=/home/agoge/agoge/.venv/bin/agoge
+LOGS=/home/agoge/agoge/data/logs
+
+# 04:00 — pull yesterday from COROS, score it, write the daily note.
+0 4 * * * mkdir -p $LOGS && $AGOGE nightly >> $LOGS/nightly.log 2>&1
+
+# 07:00 — morning check: readiness + any unresolved injury follow-ups.
+0 7 * * * $AGOGE status >> $LOGS/status.log 2>&1
+
+# Sunday 18:00 — weekly review, next week's plan, rebuild the profile.
+0 18 * * 0 $AGOGE weekly >> $LOGS/weekly.log 2>&1
+
+# Nutrition sync, after Cronometer has had time to settle.
+30 4 * * * $AGOGE nutrition sync --date yesterday >> $LOGS/nutrition.log 2>&1
+
+# Monthly — keep a dated backup of the database off in a corner.
+0 3 1 * * cp /home/agoge/agoge/data/agoge.db /home/agoge/backups/agoge-$(date +\%Y\%m\%d).db

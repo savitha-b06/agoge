@@ -90,6 +90,26 @@ class Athlete:
                 return block
         return None
 
+    def previous_block(self, today: date | None = None) -> dict[str, Any] | None:
+        """Most recent block whose end is strictly before today."""
+        today = today or date.today()
+        prev = None
+        for block in self.raw.get("blocks", []):
+            if _as_date(block["end"]) < today:
+                if prev is None or _as_date(block["end"]) > _as_date(prev["end"]):
+                    prev = block
+        return prev
+
+    def next_block(self, today: date | None = None) -> dict[str, Any] | None:
+        """Soonest block whose start is strictly after today."""
+        today = today or date.today()
+        nxt = None
+        for block in self.raw.get("blocks", []):
+            if _as_date(block["start"]) > today:
+                if nxt is None or _as_date(block["start"]) < _as_date(nxt["start"]):
+                    nxt = block
+        return nxt
+
     @property
     def injuries(self) -> list[dict[str, Any]]:
         return self.raw.get("injuries", [])

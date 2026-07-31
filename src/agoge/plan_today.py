@@ -15,6 +15,10 @@ from .config import Athlete
 from .db import DB
 from .plan_import import INTENSITY_TYPES, check_plan_conflicts
 
+# Miss-rule volume cut applies to endurance load only — not strength duration.
+_ENDURANCE_SPORTS = frozenset({"run", "bike", "swim", "walk", "brick"})
+_ENDURANCE_TYPES = frozenset({"endurance", "interval", "brick", "test", ""})
+
 
 def _segments(row) -> list[dict[str, Any]]:
     raw = row["segments"] if row is not None and "segments" in row.keys() else None
@@ -172,22 +176,25 @@ def what_today(db: DB, athlete: Athlete, today: date | None = None) -> dict[str,
     missed = missed_prior_sessions(db, today)
     conflicts = check_plan_conflicts(plans, athlete, db=db, today=today)
 
+    gap_pct = float(athlete.raw.get("load", {}).get("return_from_gap_pct", 70)) / 100
     effective_rows = []
     overrides = []
     for plan in plans:
         eff, ov = _apply_overrides(plan, r, flags)
+        sport = (eff.get("sport") or "").lower()
+        st = (eff.get("session_type") or "").lower()
         if (
             gap.get("gap_days")
             and gap["gap_days"] >= 3
             and eff.get("planned_min")
-            and (eff.get("session_type") or "") != "rest"
-            and (eff.get("sport") or "") != "rest"
+            and sport in _ENDURANCE_SPORTS
+            and st in _ENDURANCE_TYPES
         ):
-            trimmed = round(float(eff["planned_min"]) * 0.7, 1)
+            trimmed = round(float(eff["planned_min"]) * gap_pct, 1)
             eff = {**eff, "planned_min": trimmed}
             eff["_volume_note"] = (
-                f"2+ days missed — volume cut to 70% ({trimmed:.0f} min). "
-                f"Do not catch up."
+                f"2+ days missed — endurance volume cut to {gap_pct:.0%} "
+                f"({trimmed:.0f} min). Do not catch up."
             )
         effective_rows.append(eff)
         if ov:
@@ -217,6 +224,61 @@ def what_today(db: DB, athlete: Athlete, today: date | None = None) -> dict[str,
         "gap": gap,
         "reply": reply,
     }
+
+
+def _next_plan_day(db: DB, today: date) -> str | None:
+    row = db.conn.execute(
+        "SELECT MIN(day) AS d FROM plan "
+        "WHERE day > ? AND status IN ('planned','prescribed')",
+        (today.isoformat(),),
+    ).fetchone()
+    return row["d"] if row and row["d"] else None
+
+
+def _continuity_note(db: DB, athlete: Athlete, today: date) -> str | None:
+    """Between blocks / before an imported plan starts — routine continues.
+
+    Used instead of a bare "nothing prescribed" when today sits after a block
+    ends and before the next block or the first future plan row.
+    """
+    if athlete.current_block(today):
+        return None
+    prev = athlete.previous_block(today)
+    nxt = athlete.next_block(today)
+    plan_starts = _next_plan_day(db, today)
+    if not prev and not plan_starts:
+        return None
+
+    bits = []
+    if prev:
+        bits.append(f"{prev['name']} ended {prev['end']}")
+    if nxt:
+        bits.append(f"{nxt['name']} starts {nxt['start']}")
+    if plan_starts and (not nxt or plan_starts <= str(nxt["start"])):
+        bits.append(f"imported plan begins {plan_starts}")
+    if not bits:
+        return None
+    return "Between blocks (" + "; ".join(bits) + ") — current routine continues."
+
+
+def _no_plan_reply(db: DB, athlete: Athlete, today: date,
+                   r: dict[str, Any], flags: list[dict[str, Any]]) -> str:
+    """Empty-plan day: readiness only — never 'train as planned'."""
+    continuity = _continuity_note(db, athlete, today)
+    if continuity:
+        line = continuity
+    else:
+        line = "Nothing prescribed in the plan for today."
+    line += f" Readiness is {r['score']}/100 ({r['flag']})."
+    # Injury / recovery guidance is fine without a prescription.
+    # Green "Train the session as planned" is not — there is no session.
+    if any(f["severity"] == "red" for f in flags):
+        line += f" {r['guidance']}"
+    elif r["flag"] == "red":
+        line += " Recovery day if you do anything — walk, prehab, sleep."
+    elif r["flag"] == "amber":
+        line += " If you train, take the easy end and stop if anything sharpens."
+    return line
 
 
 def _describe_one(plan, effective) -> str:
@@ -278,10 +340,7 @@ def _compose_reply(
         )
 
     if not plans:
-        parts.append(
-            "Nothing prescribed in the plan for today. "
-            f"Readiness is {r['score']}/100 ({r['flag']}). {r['guidance']}"
-        )
+        parts.append(_no_plan_reply(db, athlete, today, r, flags))
         return " ".join(parts)
 
     # All-rest after overrides

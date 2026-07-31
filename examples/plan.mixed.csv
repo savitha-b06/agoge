@@ -1,0 +1,9 @@
+date,week_of_block,sport,session_type,planned_duration_min,target_hr_low,target_hr_high,segments,lift_focus,notes
+2026-08-10,2,run,endurance,35,117,137,,,Single-session Monday
+2026-08-11,2,swim,endurance,45,110,140,,,AM swim
+2026-08-11,2,strength,strength,50,,,,lower + prehab,PM lift
+2026-08-12,2,run,endurance,40,117,137,,,Single-session Wednesday
+2026-08-13,2,,rest,0,,,,,
+2026-08-14,2,bike,endurance,90,110,155,,,Single-session Friday
+2026-08-15,2,run,endurance,30,117,137,,,AM easy run
+2026-08-15,2,swim,endurance,40,110,140,,,PM swim

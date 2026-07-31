@@ -297,26 +297,35 @@ def import_plan(db: DB, athlete: Athlete, path: Path | str, *,
     version = version or datetime.now().strftime("v%Y%m%d-%H%M%S")
     reason = reason or f"import from {path.name}"
 
-    written, skipped = 0, 0
+    # Group by date so two-a-days survive: clear each date once, then insert all.
+    by_day: dict[str, list[dict[str, Any]]] = {}
+    skipped = 0
     for row in rows:
         day = date.fromisoformat(row["day"])
-        # Preserve anything already past, or explicitly before --from.
         if day < cutoff:
             skipped += 1
             continue
-        existing = db.plan_for_day(row["day"])
-        if existing and existing["status"] not in ("planned", "prescribed", None):
-            # completed / skipped / missed historical outcomes stay
-            if date.fromisoformat(existing["day"]) < today:
-                skipped += 1
-                continue
-        payload = {**row}
-        payload.pop("_row", None)
-        payload["version"] = version
-        payload["import_reason"] = reason
-        payload["segments"] = json.dumps(payload["segments"]) if payload.get("segments") else None
-        db.upsert_plan_row(payload)
-        written += 1
+        by_day.setdefault(row["day"], []).append(row)
+
+    written = 0
+    for day_str, day_rows in sorted(by_day.items()):
+        # Preserve historical outcome rows (done/skipped/missed); only refresh active ones.
+        existing = db.plan_for_day(day_str)
+        active = [e for e in existing if (e["status"] or "planned") in ("planned", "prescribed")]
+        if existing and not active and date.fromisoformat(day_str) < today:
+            skipped += len(day_rows)
+            continue
+        db.clear_planned_day(day_str)
+        for row in day_rows:
+            payload = {**row}
+            payload.pop("_row", None)
+            payload["version"] = version
+            payload["import_reason"] = reason
+            payload["segments"] = (
+                json.dumps(payload["segments"]) if payload.get("segments") else None
+            )
+            db.insert_plan_row(payload)
+            written += 1
 
     conflicts = check_plan_conflicts(
         [r for r in rows if date.fromisoformat(r["day"]) >= cutoff],

@@ -173,6 +173,206 @@ def gap_check(db: DB, today: date | None = None) -> dict[str, Any]:
     return {"gap_days": gap, "last_session": days[-1], "action": action}
 
 
+# ---------------------------------------------------------------- plan adherence
+
+def plan_adherence(db: DB, athlete: Athlete, day: str) -> dict[str, Any]:
+    """Compare each of today's plan rows against the matching COROS session by sport.
+
+    Two-a-days are checked independently: a planned swim matches the swim
+    session, a planned lift matches the strength session. Only fires when a
+    session was actually logged for that sport. Skips rest rows and rows with
+    populated segments. Missed-session detection lives elsewhere.
+    """
+    cfg = athlete.raw.get("adherence") or {}
+    hr_tol = float(cfg.get("hr_tolerance_bpm", 8))
+    dur_tol_pct = float(cfg.get("duration_tolerance_pct", 25))
+
+    plans = db.plan_for_day(day)
+    if not plans:
+        return {"checked": False, "reason": "no plan", "sessions": []}
+
+    logged = db.sessions_between(day, day)
+    used_session_ids: set[int] = set()
+    per_session: list[dict[str, Any]] = []
+    all_flags: list[dict[str, Any]] = []
+    all_facts: list[str] = []
+    any_checked = False
+
+    for plan in plans:
+        result = _adhere_one_plan(
+            plan, logged, used_session_ids, hr_tol, dur_tol_pct,
+        )
+        per_session.append(result)
+        if result.get("checked"):
+            any_checked = True
+            sport = result.get("plan", {}).get("sport") or "?"
+            for fact in result.get("facts") or []:
+                all_facts.append(f"[{sport}] {fact}")
+            for f in result.get("flags") or []:
+                all_flags.append({**f, "sport": sport,
+                                  "message": f"[{sport}] {f['message']}"})
+
+    if not any_checked:
+        reasons = [s.get("reason") for s in per_session if s.get("reason")]
+        return {
+            "checked": False,
+            "reason": "; ".join(reasons) if reasons else "nothing to check",
+            "sessions": per_session,
+        }
+
+    return {
+        "checked": True,
+        "ok": not all_flags,
+        "hr_flag": any(f["kind"] == "hr" for f in all_flags),
+        "duration_flag": any(f["kind"] == "duration" for f in all_flags),
+        "flags": all_flags,
+        "facts": all_facts,
+        "hr_tolerance_bpm": hr_tol,
+        "duration_tolerance_pct": dur_tol_pct,
+        "sessions": per_session,
+    }
+
+
+def _adhere_one_plan(plan, logged, used_session_ids: set[int],
+                     hr_tol: float, dur_tol_pct: float) -> dict[str, Any]:
+    sport = (plan["sport"] or "").lower()
+    session_type = (plan["session_type"] or "").lower()
+
+    if session_type == "rest" or sport == "rest":
+        return {"checked": False, "reason": "rest", "plan": _plan_public(plan)}
+
+    if _segments_populated(plan):
+        return {"checked": False, "reason": "segments populated",
+                "plan": _plan_public(plan)}
+
+    candidates = [
+        s for s in logged
+        if (s["sport"] or "").lower() == sport
+        and (s["id"] not in used_session_ids if "id" in s.keys() else True)
+    ]
+    if not candidates and sport:
+        # No sport match — do not treat as a miss here.
+        return {"checked": False, "reason": "no matching session",
+                "plan": _plan_public(plan)}
+    if not candidates:
+        candidates = [s for s in logged
+                      if ("id" not in s.keys() or s["id"] not in used_session_ids)]
+    if not candidates:
+        return {"checked": False, "reason": "no matching session",
+                "plan": _plan_public(plan)}
+
+    planned_min = plan["planned_min"]
+    session = _pick_adherence_session(candidates, planned_min)
+    if "id" in session.keys():
+        used_session_ids.add(session["id"])
+
+    flags: list[dict[str, Any]] = []
+    facts: list[str] = []
+    hr_flag = False
+    dur_flag = False
+
+    lo, hi = plan["target_hr_low"], plan["target_hr_high"]
+    avg_hr = session["avg_hr"]
+    # HR band only when the plan specifies one (typical for endurance).
+    if avg_hr is not None and lo is not None and hi is not None:
+        if avg_hr < lo:
+            hr_delta = lo - avg_hr
+            side = "below target low"
+        elif avg_hr > hi:
+            hr_delta = avg_hr - hi
+            side = "above target high"
+        else:
+            hr_delta = 0
+            side = "inside"
+        hr_flag = hr_delta > hr_tol
+        facts.append(
+            f"avg HR {avg_hr} vs target {lo}-{hi} "
+            f"({hr_delta:.0f} bpm {side}, tolerance {hr_tol:.0f} bpm)"
+        )
+        if hr_flag:
+            flags.append({
+                "kind": "hr",
+                "message": (
+                    f"avg HR {avg_hr} is {hr_delta:.0f} bpm {side} "
+                    f"[{lo}, {hi}] (tolerance {hr_tol:.0f} bpm)"
+                ),
+                "avg_hr": avg_hr,
+                "target_hr_low": lo,
+                "target_hr_high": hi,
+                "delta_bpm": hr_delta,
+                "tolerance_bpm": hr_tol,
+            })
+
+    actual_min = session["duration_min"]
+    if actual_min is not None and planned_min and planned_min > 0:
+        dur_delta_pct = 100 * (actual_min - planned_min) / planned_min
+        dur_flag = abs(dur_delta_pct) > dur_tol_pct
+        facts.append(
+            f"duration {actual_min:.0f} min vs planned {planned_min:.0f} min "
+            f"({dur_delta_pct:+.0f}%, tolerance {dur_tol_pct:.0f}%)"
+        )
+        if dur_flag:
+            flags.append({
+                "kind": "duration",
+                "message": (
+                    f"duration {actual_min:.0f} min vs planned {planned_min:.0f} min "
+                    f"({dur_delta_pct:+.0f}%, tolerance {dur_tol_pct:.0f}%)"
+                ),
+                "actual_min": actual_min,
+                "planned_min": planned_min,
+                "delta_pct": round(dur_delta_pct, 1),
+                "tolerance_pct": dur_tol_pct,
+            })
+
+    return {
+        "checked": True,
+        "ok": not flags,
+        "hr_flag": hr_flag,
+        "duration_flag": dur_flag,
+        "flags": flags,
+        "facts": facts,
+        "plan": _plan_public(plan),
+        "session": {
+            "sport": session["sport"],
+            "duration_min": actual_min,
+            "avg_hr": avg_hr,
+        },
+    }
+
+
+def _plan_public(plan) -> dict[str, Any]:
+    return {
+        "sport": plan["sport"],
+        "session_type": plan["session_type"],
+        "planned_min": plan["planned_min"],
+        "target_hr_low": plan["target_hr_low"],
+        "target_hr_high": plan["target_hr_high"],
+        "title": plan["title"] if "title" in plan.keys() else None,
+    }
+
+
+def _segments_populated(plan) -> bool:
+    raw = plan["segments"] if "segments" in plan.keys() else None
+    if raw is None or raw == "":
+        return False
+    if isinstance(raw, (list, tuple, dict)):
+        return bool(raw)
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return bool(str(raw).strip())
+    return bool(parsed)
+
+
+def _pick_adherence_session(sessions: list, planned_min: float | None):
+    if len(sessions) == 1 or not planned_min:
+        return sessions[0]
+    return min(
+        sessions,
+        key=lambda s: abs((s["duration_min"] or 0) - planned_min),
+    )
+
+
 # ---------------------------------------------------------------- race maths
 
 def race_status(db: DB, athlete: Athlete, today: date | None = None) -> dict[str, Any]:

@@ -1,7 +1,8 @@
 """'What do I need to do today?' — plan lookup with readiness/injury overrides.
 
 A spreadsheet written weeks in advance cannot see this morning's readiness.
-Today's readiness wins. Injury gate outranks everything.
+Today's readiness wins. Injury gate outranks everything. Two-a-days list every
+prescribed session for the date.
 """
 from __future__ import annotations
 
@@ -30,35 +31,33 @@ def _segments(row) -> list[dict[str, Any]]:
 def missed_prior_sessions(db: DB, today: date, lookback: int = 3) -> list[dict[str, Any]]:
     """Prescribed sessions in the last few days with no matching COROS session.
 
-    Surfaced before today's prescription because the miss-rules change what
-    today should be.
+    Each plan row is checked independently by sport so a completed swim does not
+    clear a missed strength session on the same day.
     """
     missed = []
     for back in range(1, lookback + 1):
         day = today - timedelta(days=back)
-        plan = db.plan_for_day(day.isoformat())
-        if not plan:
-            continue
-        st = (plan["session_type"] or "").lower()
-        sport = (plan["sport"] or "").lower()
-        if st == "rest" or sport == "rest" or plan["status"] in (
-            "done", "skipped", "cancelled", "missed",
-        ):
-            continue
-        sessions = db.sessions_between(day.isoformat(), day.isoformat())
-        if sport and sport not in ("rest", "other"):
-            matched = [s for s in sessions if s["sport"] == sport]
-        else:
-            matched = list(sessions)
-        if matched:
-            continue
-        missed.append({
-            "day": day.isoformat(),
-            "sport": plan["sport"],
-            "session_type": plan["session_type"],
-            "title": plan["title"],
-            "planned_min": plan["planned_min"],
-        })
+        for plan in db.plan_for_day(day.isoformat()):
+            st = (plan["session_type"] or "").lower()
+            sport = (plan["sport"] or "").lower()
+            if st == "rest" or sport == "rest" or plan["status"] in (
+                "done", "skipped", "cancelled", "missed",
+            ):
+                continue
+            sessions = db.sessions_between(day.isoformat(), day.isoformat())
+            if sport and sport not in ("rest", "other"):
+                matched = [s for s in sessions if s["sport"] == sport]
+            else:
+                matched = list(sessions)
+            if matched:
+                continue
+            missed.append({
+                "day": day.isoformat(),
+                "sport": plan["sport"],
+                "session_type": plan["session_type"],
+                "title": plan["title"],
+                "planned_min": plan["planned_min"],
+            })
     return missed
 
 
@@ -118,78 +117,99 @@ def _injury_clear_note(db: DB, athlete: Athlete, today: date) -> str:
     return bits[0] + ", no restrictions today"
 
 
-def what_today(db: DB, athlete: Athlete, today: date | None = None) -> dict[str, Any]:
-    """Full answer for 'what do I need to do today?'"""
-    today = today or date.today()
-    day = today.isoformat()
-    plan = db.plan_for_day(day)
-    r = readiness(db, athlete, day)
-    flags = injury_flags(db, athlete, day)
-    gap = gap_check(db, today)
-    missed = missed_prior_sessions(db, today)
-    conflicts = check_plan_conflicts(
-        [dict(plan)] if plan else [], athlete, db=db, today=today,
-    )
+def _apply_overrides(plan, r: dict[str, Any],
+                     flags: list[dict[str, Any]]) -> tuple[dict[str, Any], dict | None]:
+    """Return (effective_row, override) for one plan row."""
+    base = dict(plan)
+    sport = (plan["sport"] or "").lower()
+    st = (plan["session_type"] or "").lower()
 
-    override = None
-    effective = dict(plan) if plan else None
-
-    if plan and r["flag"] == "red":
+    if r["flag"] == "red":
         override = {"reason": "readiness_red", "message": r["guidance"]}
         if any(f["severity"] == "red" for f in flags):
-            if (plan["sport"] or "").lower() == "run" or (
-                plan["session_type"] or ""
-            ).lower() in INTENSITY_TYPES:
-                effective = {
-                    **dict(plan),
+            # Injury gate: kill running / intensity; leave swim/strength alone.
+            if sport == "run" or st in INTENSITY_TYPES:
+                return {
+                    **base,
                     "sport": "rest",
                     "session_type": "rest",
                     "title": "recovery (injury gate)",
                     "planned_min": 0,
                     "segments": "[]",
                     "notes": "Injury gate open — prescribed session overridden.",
-                }
-        else:
-            effective = {
-                **dict(plan),
-                "session_type": "rest",
-                "title": "recovery day",
-                "planned_min": min(float(plan["planned_min"] or 0), 30),
-                "notes": "Readiness red — prescribed intensity overridden.",
-            }
-    elif plan and r["flag"] == "amber":
+                }, override
+            return base, override
+        return {
+            **base,
+            "session_type": "rest",
+            "title": "recovery day",
+            "planned_min": min(float(plan["planned_min"] or 0), 30),
+            "notes": "Readiness red — prescribed intensity overridden.",
+        }, override
+
+    if r["flag"] == "amber":
         override = {"reason": "readiness_amber", "message": r["guidance"]}
-        if (plan["session_type"] or "").lower() in INTENSITY_TYPES:
-            effective = {
-                **dict(plan),
+        if st in INTENSITY_TYPES:
+            return {
+                **base,
                 "session_type": "endurance",
                 "title": f"easy {(plan['sport'] or 'session')} (amber override)",
                 "notes": "Amber readiness — intensity dropped to easy endurance.",
-            }
+            }, override
+        return base, override
 
-    volume_note = None
-    if (
-        gap.get("gap_days")
-        and gap["gap_days"] >= 3
-        and effective
-        and effective.get("planned_min")
-        and (effective.get("session_type") or "") != "rest"
-    ):
-        trimmed = round(float(effective["planned_min"]) * 0.7, 1)
-        effective = {**effective, "planned_min": trimmed}
-        volume_note = (
-            f"2+ days missed — volume cut to 70% ({trimmed:.0f} min). "
-            f"Do not catch up."
-        )
+    return base, None
+
+
+def what_today(db: DB, athlete: Athlete, today: date | None = None) -> dict[str, Any]:
+    """Full answer for 'what do I need to do today?'"""
+    today = today or date.today()
+    day = today.isoformat()
+    plans = [dict(p) for p in db.plan_for_day(day)]
+    r = readiness(db, athlete, day)
+    flags = injury_flags(db, athlete, day)
+    gap = gap_check(db, today)
+    missed = missed_prior_sessions(db, today)
+    conflicts = check_plan_conflicts(plans, athlete, db=db, today=today)
+
+    effective_rows = []
+    overrides = []
+    for plan in plans:
+        eff, ov = _apply_overrides(plan, r, flags)
+        if (
+            gap.get("gap_days")
+            and gap["gap_days"] >= 3
+            and eff.get("planned_min")
+            and (eff.get("session_type") or "") != "rest"
+            and (eff.get("sport") or "") != "rest"
+        ):
+            trimmed = round(float(eff["planned_min"]) * 0.7, 1)
+            eff = {**eff, "planned_min": trimmed}
+            eff["_volume_note"] = (
+                f"2+ days missed — volume cut to 70% ({trimmed:.0f} min). "
+                f"Do not catch up."
+            )
+        effective_rows.append(eff)
+        if ov:
+            overrides.append(ov)
+
+    # Dedupe override messages for the reply header.
+    override = overrides[0] if overrides else None
+    volume_note = next(
+        (e["_volume_note"] for e in effective_rows if e.get("_volume_note")),
+        None,
+    )
 
     reply = _compose_reply(
-        db, athlete, today, plan, effective, r, flags, missed,
+        db, athlete, today, plans, effective_rows, r, flags, missed,
         override, volume_note, conflicts, gap,
     )
     return {
         "day": day,
-        "plan": dict(plan) if plan else None,
-        "effective": effective,
+        "plan": plans[0] if len(plans) == 1 else None,
+        "plans": plans,
+        "effective": effective_rows[0] if len(effective_rows) == 1 else None,
+        "effective_plans": effective_rows,
         "readiness": r,
         "missed_prior": missed,
         "override": override,
@@ -199,12 +219,46 @@ def what_today(db: DB, athlete: Athlete, today: date | None = None) -> dict[str,
     }
 
 
+def _describe_one(plan, effective) -> str:
+    sport = (effective.get("sport") or plan.get("sport") or "session").lower()
+    st = (effective.get("session_type") or "").lower()
+
+    if st == "rest" or sport == "rest":
+        return "Rest / recovery"
+
+    if st == "strength" or sport == "strength":
+        focus = effective.get("lift_focus") or plan.get("lift_focus")
+        line = "Strength"
+        if focus:
+            line += f" — {focus}"
+        notes = effective.get("notes") or plan.get("notes")
+        if notes and "override" not in (notes or "").lower():
+            line += f". {notes}"
+        return line if line.endswith(".") else line + "."
+
+    dur = _human_duration(effective.get("planned_min") or plan.get("planned_min"))
+    sport_label = sport.capitalize() if sport else "Session"
+    head = sport_label + (f", {dur}" if dur else "") + "."
+
+    segs = _describe_segments(_segments(effective))
+    if segs:
+        head += f" {segs}."
+    else:
+        lo = effective.get("target_hr_low") or plan.get("target_hr_low")
+        hi = effective.get("target_hr_high") or plan.get("target_hr_high")
+        if lo and hi:
+            head += f" Keep HR {lo}–{hi}."
+        elif hi:
+            head += f" Keep it under {hi}."
+    return head
+
+
 def _compose_reply(
     db: DB,
     athlete: Athlete,
     today: date,
-    plan,
-    effective,
+    plans: list[dict[str, Any]],
+    effective_rows: list[dict[str, Any]],
     r: dict[str, Any],
     flags: list[dict[str, Any]],
     missed: list[dict[str, Any]],
@@ -223,18 +277,19 @@ def _compose_reply(
             f"({gap['action']})"
         )
 
-    if not plan:
+    if not plans:
         parts.append(
             "Nothing prescribed in the plan for today. "
             f"Readiness is {r['score']}/100 ({r['flag']}). {r['guidance']}"
         )
         return " ".join(parts)
 
-    assert effective is not None
-    sport = (effective.get("sport") or plan["sport"] or "session").lower()
-    st = (effective.get("session_type") or "").lower()
-
-    if st == "rest" or sport == "rest":
+    # All-rest after overrides
+    if all(
+        (e.get("session_type") or "").lower() == "rest"
+        or (e.get("sport") or "").lower() == "rest"
+        for e in effective_rows
+    ):
         if override and override["reason"] == "readiness_red":
             parts.append(override["message"])
         else:
@@ -243,52 +298,40 @@ def _compose_reply(
             parts.append("; ".join(f["message"] for f in flags) + ".")
         return " ".join(parts)
 
-    if st == "strength":
-        focus = effective.get("lift_focus") or plan["lift_focus"]
-        line = "Strength"
-        if focus:
-            line += f" — {focus}"
-        notes = effective.get("notes") or plan["notes"]
-        if notes:
-            line += f". {notes}"
-        if override:
-            line += f" Readiness {r['flag']} — take it easy if anything feels off."
-        parts.append(line if line.endswith(".") else line + ".")
-        return " ".join(parts)
+    session_lines = [
+        _describe_one(p, e)
+        for p, e in zip(plans, effective_rows)
+        if (e.get("session_type") or "").lower() != "rest"
+        and (e.get("sport") or "").lower() != "rest"
+    ]
 
-    dur = _human_duration(effective.get("planned_min") or plan["planned_min"])
-    sport_label = sport.capitalize() if sport else "Session"
-    head = sport_label + (f", {dur}" if dur else "") + "."
-
-    segs = _describe_segments(_segments(effective))
-    if segs:
-        head += f" {segs}."
+    if len(session_lines) == 1:
+        head = session_lines[0]
     else:
-        lo = effective.get("target_hr_low") or plan["target_hr_low"]
-        hi = effective.get("target_hr_high") or plan["target_hr_high"]
-        if lo and hi:
-            head += f" Keep HR {lo}–{hi}."
-        elif hi:
-            head += f" Keep it under {hi}."
+        numbered = " ".join(
+            f"({i}) {line.rstrip('.')}" for i, line in enumerate(session_lines, 1)
+        )
+        head = f"Two-a-day: {numbered}."
 
     if override and override["reason"] == "readiness_amber":
-        head += " Readiness amber — take the easy end, stop if anything sharpens."
+        head = head.rstrip(".") + ". Readiness amber — take the easy end, stop if anything sharpens."
     elif override and override["reason"] == "readiness_red":
-        head += f" {override['message']}"
+        # Partial override (e.g. run killed, swim kept)
+        head = head.rstrip(".") + f". {override['message']}"
     elif r["flag"] == "green" and not flags:
-        head += f" {_injury_clear_note(db, athlete, today).capitalize()}."
+        head = head.rstrip(".") + f". {_injury_clear_note(db, athlete, today).capitalize()}."
     elif r["flag"] == "green":
-        head += " Train as planned."
+        head = head.rstrip(".") + ". Train as planned."
 
     if volume_note:
-        head += f" {volume_note}"
+        head = head.rstrip(".") + f". {volume_note}"
     for c in conflicts:
         if c["kind"] == "block_intensity":
-            head += (
-                " Conflict: this intensity session sits in a base/Z2-only block "
+            head = head.rstrip(".") + (
+                ". Conflict: an intensity session sits in a base/Z2-only block "
                 "— do not treat the spreadsheet as gospel today."
             )
             break
 
-    parts.append(head)
+    parts.append(head if head.endswith(".") else head + ".")
     return " ".join(parts)

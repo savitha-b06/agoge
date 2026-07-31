@@ -67,9 +67,9 @@ def main():
     assert res["rows_written"] >= 5
     assert any(c["kind"] == "block_intensity" for c in res["conflicts"]), res["conflicts"]
 
-    row = db.plan_for_day("2026-08-15")
-    assert row is not None
-    segs = json.loads(row["segments"])
+    rows = db.plan_for_day("2026-08-15")
+    assert rows
+    segs = json.loads(rows[0]["segments"])
     assert len(segs) == 3
     print(f"  bike long ride segments: {len(segs)}")
 

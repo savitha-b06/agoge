@@ -241,9 +241,17 @@ class DB:
                 (day, kind, body, model),
             )
 
-    def upsert_plan_row(self, row: dict[str, Any]) -> None:
-        """Insert or replace a future plan row. Past/logged rows are left alone
-        by the caller — this method only writes what it is given."""
+    def clear_planned_day(self, day: str) -> None:
+        """Drop active prescriptions for a day. Call once per date before a
+        multi-row import batch so two-a-days are not wiped by a second insert."""
+        with self.tx() as c:
+            c.execute(
+                "DELETE FROM plan WHERE day=? AND status IN ('planned','prescribed')",
+                (day,),
+            )
+
+    def insert_plan_row(self, row: dict[str, Any]) -> None:
+        """Insert one plan row. Does not delete siblings — import clears the day first."""
         cols = [
             "day", "sport", "title", "detail", "planned_min", "status",
             "week_start", "week_of_block", "session_type", "target_hr_low",
@@ -257,16 +265,19 @@ class DB:
         data.setdefault("source", "import")
         placeholders = ", ".join(f":{c}" for c in cols)
         with self.tx() as c:
-            # One active prescription per day for imported/weekly plans: drop
-            # existing future-status rows for that day before inserting.
-            c.execute(
-                "DELETE FROM plan WHERE day=? AND status IN ('planned','prescribed')",
-                (data["day"],),
-            )
             c.execute(
                 f"INSERT INTO plan ({', '.join(cols)}) VALUES ({placeholders})",
                 data,
             )
+
+    def upsert_plan_row(self, row: dict[str, Any]) -> None:
+        """Insert a single plan row, replacing any existing active rows for that day.
+
+        Prefer clear_planned_day + insert_plan_row when writing multiple sessions
+        for the same date (import batches). This helper is for one-off writes.
+        """
+        self.clear_planned_day(row["day"])
+        self.insert_plan_row(row)
 
     def record_plan_import(self, *, version: str, from_day: str | None,
                            reason: str, file_name: str,
@@ -289,10 +300,11 @@ class DB:
 
     # ---------- reads ----------
 
-    def plan_for_day(self, day: str) -> sqlite3.Row | None:
+    def plan_for_day(self, day: str) -> list[sqlite3.Row]:
+        """All plan rows for a calendar day (supports two-a-days)."""
         return self.conn.execute(
-            "SELECT * FROM plan WHERE day=? ORDER BY id DESC LIMIT 1", (day,)
-        ).fetchone()
+            "SELECT * FROM plan WHERE day=? ORDER BY id", (day,)
+        ).fetchall()
 
     def plan_between(self, start: str, end: str) -> list[sqlite3.Row]:
         return self.conn.execute(

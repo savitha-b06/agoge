@@ -13,6 +13,8 @@ LOGS=/home/agoge/agoge/data/logs
 0 7 * * * $AGOGE status >> $LOGS/status.log 2>&1
 
 # Sunday 18:00 — weekly review, next week's plan, rebuild the profile.
+# Every other Sunday of the current block (days-since-block-start mod 14) the
+# same command also writes the biweekly deep review — do not add a second cron.
 0 18 * * 0 $AGOGE weekly >> $LOGS/weekly.log 2>&1
 
 # Nutrition sync, after Cronometer has had time to settle.

@@ -62,6 +62,11 @@ load:
   # Drop to this fraction of planned volume after a 2-3 day gap.
   return_from_gap_pct: 70
 
+# How far a logged endurance session may drift from the plan before nightly flags it.
+adherence:
+  hr_tolerance_bpm: 8
+  duration_tolerance_pct: 25
+
 checkpoints:
   - due: 2026-08-25
     metric: long_run_distance_mi
@@ -69,3 +74,14 @@ checkpoints:
   - due: 2026-08-25
     metric: z2_pace_mph
     target: 4.2
+
+# Fixed baseline for the biweekly deep review's pace/HR head-to-head.
+# Matching sessions: same sport, avg HR within ±hr_tolerance, distance logged.
+benchmarks:
+  - key: treadmill_z2_baseline
+    date: 2026-07-28
+    sport: run
+    avg_hr: 129
+    pace_per_km: "11:05"
+    hr_tolerance: 5
+    label: Jul 28, 2026 treadmill Z2

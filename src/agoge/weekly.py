@@ -1,4 +1,8 @@
-"""Sunday: review the week, plan the next one, rebuild the profile."""
+"""Sunday: review the week, plan the next one, rebuild the profile.
+
+Every other Sunday of the current block (days-since-block-start mod 14), also
+runs the biweekly deep review — same cron entry, no second schedule.
+"""
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -6,6 +10,7 @@ from typing import Any
 
 from .analysis import (checkpoint_status, gap_check, injury_flags, load_check,
                        plan_divergence, race_status, week_bounds)
+from .biweekly import is_biweekly_deep_review_day, run as run_biweekly
 from .config import Athlete, settings
 from .db import DB
 from .fitness import fitness_trend, format_fitness_trend
@@ -13,7 +18,8 @@ from .llm import complete, load_prompt
 from .profile import read_profile, update_profile
 
 
-def run(today: date | None = None, rebuild_profile: bool = True) -> dict[str, Any]:
+def run(today: date | None = None, rebuild_profile: bool = True,
+        force_biweekly: bool = False) -> dict[str, Any]:
     today = today or date.today()
     athlete = Athlete.load(settings.athlete_file)
     db = DB(settings.db_path)
@@ -26,6 +32,12 @@ def run(today: date | None = None, rebuild_profile: bool = True) -> dict[str, An
     out: dict[str, Any] = {"report": body, "context": ctx}
     if rebuild_profile:
         out["profile"] = update_profile(db, athlete, today)
+
+    due = force_biweekly or is_biweekly_deep_review_day(athlete, today)
+    if due:
+        bi = run_biweekly(db, athlete, today, force=True)
+        if bi:
+            out["biweekly"] = bi
     return out
 
 

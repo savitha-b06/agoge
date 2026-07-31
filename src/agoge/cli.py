@@ -110,10 +110,35 @@ def cmd_nightly(args):
 
 def cmd_weekly(args):
     from .weekly import run
-    out = run(_day(args.date) if args.date else None, rebuild_profile=not args.no_profile)
+    out = run(
+        _day(args.date) if args.date else None,
+        rebuild_profile=not args.no_profile,
+        force_biweekly=args.biweekly,
+    )
     console.print(out["report"])
+    if out.get("biweekly"):
+        console.print("\n[bold]── Biweekly deep review ──[/bold]\n")
+        console.print(out["biweekly"]["report"])
+    elif args.biweekly:
+        console.print("[yellow]Biweekly was forced but produced no report.[/yellow]")
     if out.get("profile"):
         console.print(f"\n[dim]Profile rebuilt → {settings.profile_path}[/dim]")
+
+
+def cmd_biweekly(args):
+    """Force the biweekly deep review (normally auto-fired from Sunday weekly)."""
+    from .biweekly import compute_biweekly_metrics, format_biweekly_context, run
+    db, athlete = _ctx()
+    day = _day(args.date)
+    if args.metrics_only:
+        m = compute_biweekly_metrics(db, athlete, day)
+        console.print(format_biweekly_context(m, athlete, day))
+        return
+    out = run(db, athlete, day, force=True)
+    if not out:
+        console.print("[yellow]No biweekly report generated.[/yellow]")
+        return
+    console.print(out["report"])
 
 
 def cmd_sessions(args):
@@ -318,6 +343,13 @@ def main(argv=None):
 
     s = add("weekly", cmd_weekly, help="Sunday review and week ahead")
     s.add_argument("--no-profile", action="store_true")
+    s.add_argument("--biweekly", action="store_true",
+                   help="Also run the biweekly deep review (auto on every other Sunday)")
+
+    s = add("biweekly", cmd_biweekly,
+            help="Biweekly deep review (14d vs prior 14d); normally auto from weekly")
+    s.add_argument("--metrics-only", action="store_true",
+                   help="Print deterministic metrics, skip the LLM")
 
     s = add("sessions", cmd_sessions, help="Recent sessions table")
     s.add_argument("--days", type=int, default=21)

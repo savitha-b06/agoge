@@ -9,7 +9,8 @@ from datetime import date, timedelta
 from typing import Any
 
 from .analysis import (energy_availability, gap_check, injury_flags, load_check,
-                       protein_status, race_status, readiness, zone_compliance)
+                       plan_adherence, protein_status, race_status, readiness,
+                       zone_compliance)
 from .config import Athlete, settings
 from .coros import CorosClient
 from .db import DB
@@ -118,6 +119,15 @@ def _day_context(db: DB, athlete: Athlete, day: date) -> str:
               f"{load['last_week_min']:.0f} min last week "
               f"(cap {load['cap_min']}, headroom {load['headroom_min']})",
               f"Consistency: {gap['action']}"]
+
+    adherence = plan_adherence(db, athlete, d)
+    if adherence.get("checked"):
+        status = "within tolerance" if adherence["ok"] else "outside tolerance"
+        lines.append(f"Plan adherence: {status}")
+        for fact in adherence.get("facts") or []:
+            lines.append(f"  {fact}")
+        for f in adherence.get("flags") or []:
+            lines.append(f"  FLAG [{f['kind']}] {f['message']}")
 
     ea = energy_availability(db, athlete, d)
     if ea.get("available"):

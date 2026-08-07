@@ -139,14 +139,40 @@ def main():
     assert "Status:  under_progressing" not in format_weekly_progression(p)
     print("  ok")
 
+    print("== 5. insufficient_data: both actual weeks zero ==")
+    db, athlete = fresh()
+    # Plan exists both weeks but nothing logged
+    _seed_week(db, athlete, last_mon, sessions=[],
+               plan_min_per_day=[(1, 40), (3, 30)])
+    _seed_week(db, athlete, this_mon, sessions=[],
+               plan_min_per_day=[(1, 45), (3, 35)])
+    p = weekly_progression(db, athlete, sunday)
+    print(f"  status={p['status']}: {p['message']}")
+    assert p["status"] == "insufficient_data", p
+    assert p["status"] != "on_track"
+    assert "Not the same as on track" in p["message"]
+    assert "Status:  on_track" not in format_weekly_progression(p)
+    print("  ok")
+
+    print("== 6. insufficient_data: planned last week was zero ==")
+    db, athlete = fresh()
+    _seed_week(db, athlete, last_mon,
+               sessions=[(1, 40), (3, 30)],
+               plan_min_per_day=[])  # no plan last week
+    _seed_week(db, athlete, this_mon,
+               sessions=[(1, 45), (3, 35)],
+               plan_min_per_day=[(1, 45), (3, 35)])
+    p = weekly_progression(db, athlete, sunday)
+    print(f"  status={p['status']}: {p['message']}")
+    assert p["status"] == "insufficient_data", p
+    assert p["planned_delta_pct"] is None
+    assert "uncomputable" in p["message"]
+    assert p["status"] != "on_track"
+    print("  ok")
+
     print("== messaging never contradicts across cases ==")
-    # Re-run all four statuses in one go for a quick matrix check
-    statuses = []
-    for label, setup in (
-        ("on_track", None),  # already asserted above
-    ):
-        pass
-    print("  case matrix: on_track / under_progressing / holding / capped — exclusive")
+    print("  case matrix: on_track / under_progressing / holding / capped / "
+          "insufficient_data — exclusive")
     print("\nOK — weekly progression classifications are consistent.")
 
 

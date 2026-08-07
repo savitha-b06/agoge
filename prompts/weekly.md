@@ -34,9 +34,10 @@ of planned volume, say so explicitly in the review. Suggest that a structural
 revision may be warranted; do not silently rewrite the imported plan yourself.
 
 **Week-over-week progression** — if a progression status is provided
-(on_track / under_progressing / capped / holding), one sentence acknowledging
-it. If status is holding (red-light) or capped, do not also call the week
-under-progressing. Next week's minute total is already stated from the plan
-table — use that figure; do not invent a different one.
+(on_track / under_progressing / capped / holding / insufficient_data), one
+sentence acknowledging it. If status is holding (red-light) or capped, do not
+also call the week under-progressing. insufficient_data is not on_track — say
+there was nothing to measure. Next week's minute total is already stated from
+the plan table — use that figure; do not invent a different one.
 
 Never state a number you were not given. Be direct and specific. No filler.

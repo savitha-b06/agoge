@@ -711,8 +711,8 @@ def weekly_progression(db: DB, athlete: Athlete, today: date | None = None) -> d
     """Week-over-week progression: did volume increase like the plan intended?
 
     Distinct from plan_adherence (today vs prescription) and load_check (15% cap).
-    Classifies: on_track | under_progressing | capped | holding.
-    Priority avoids contradictions: red-light holding > load-cap > under-progressing.
+    Classifies: on_track | under_progressing | capped | holding | insufficient_data.
+    Priority: red-light holding > load-cap > insufficient_data > under-progressing.
     """
     today = today or date.today()
     this_start, this_end = week_bounds(today)
@@ -740,6 +740,10 @@ def weekly_progression(db: DB, athlete: Athlete, today: date | None = None) -> d
     load = load_check(db, athlete, today)
     red = red_light_signals(db, athlete, today)
     green = green_light_signals(db, athlete, today)
+
+    no_actual_volume = actual_this == 0 and actual_last == 0
+    # Planned % needs a non-zero prior week; without it the band is uncomputable.
+    no_planned_baseline = planned_last == 0
 
     plan_wants_growth = planned_delta is not None and planned_delta > 2
     actual_flat_or_down = actual_delta is not None and actual_delta <= 2
@@ -771,6 +775,24 @@ def weekly_progression(db: DB, athlete: Athlete, today: date | None = None) -> d
             f"({load['this_week_min']:.0f} min > cap {load['cap_min']:.0f}). "
             f"Progression is capped by the existing guard — the real problem is already flagged."
         )
+    elif no_actual_volume or no_planned_baseline:
+        status = "insufficient_data"
+        if no_actual_volume and no_planned_baseline:
+            why = (
+                "no logged minutes this week or last, and no planned volume "
+                "last week to compute a ramp against"
+            )
+        elif no_actual_volume:
+            why = "no logged minutes this week or last — nothing to measure"
+        else:
+            why = (
+                f"planned last week was 0 min (this week planned {planned_this:.0f}) "
+                f"— planned week-over-week % is uncomputable"
+            )
+        message = (
+            f"Insufficient data: {why}. "
+            f"Not the same as on track."
+        )
     elif plan_wants_growth and (actual_flat_or_down or meaningfully_below):
         status = "under_progressing"
         message = (
@@ -781,13 +803,11 @@ def weekly_progression(db: DB, athlete: Athlete, today: date | None = None) -> d
             f"{'n/a' if actual_delta is None else f'{actual_delta:+.0f}%'} "
             f"({actual_last:.0f} → {actual_this:.0f} min)."
         )
-    elif within_band or (planned_delta is None and actual_delta is not None and actual_delta > -band_pp):
+    elif within_band:
         status = "on_track"
         message = (
             f"On track: actual "
-            f"{'n/a' if actual_delta is None else f'{actual_delta:+.0f}%'} "
-            f"vs planned "
-            f"{'n/a' if planned_delta is None else f'{planned_delta:+.0f}%'} "
+            f"{actual_delta:+.0f}% vs planned {planned_delta:+.0f}% "
             f"(band ±{band_pp:.0f} pp)."
         )
         if green["active"] and ahead:
@@ -811,11 +831,12 @@ def weekly_progression(db: DB, athlete: Athlete, today: date | None = None) -> d
         else:
             message += " No green-light confirmation — watch recovery; do not keep overshooting."
     else:
-        status = "on_track"
+        status = "insufficient_data"
         message = (
-            f"Insufficient plan history to score the band; "
-            f"actual {actual_last:.0f} → {actual_this:.0f} min "
-            f"({('n/a' if actual_delta is None else f'{actual_delta:+.0f}%')})."
+            f"Insufficient data to score progression "
+            f"(actual {actual_last:.0f} → {actual_this:.0f} min, "
+            f"planned {planned_last:.0f} → {planned_this:.0f} min). "
+            f"Not the same as on track."
         )
 
     next_week = {

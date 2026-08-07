@@ -84,6 +84,23 @@ def main():
     assert not r["hr_flag"]
     print(f"  {r['flags'][0]['message']}")
 
+    print("== endurance with blank HR targets: skip HR, still check duration ==")
+    db, athlete = fresh()
+    db.upsert_plan_row(plan_row(
+        target_hr_low=None, target_hr_high=None, planned_min=40,
+    ))
+    store_payload(db, athlete, DAY, payload(avg_hr=150, minutes=55))
+    r = plan_adherence(db, athlete, DAY.isoformat())
+    assert r["checked"]
+    assert not r["hr_flag"], r
+    assert r["duration_flag"], r  # 55 vs 40 = +37.5% > 25%
+    assert all(f["kind"] != "hr" for f in r["flags"])
+    assert any(f["kind"] == "duration" for f in r["flags"])
+    assert not any("target None" in f or "None-None" in f for f in r["facts"])
+    assert all("vs target" not in f for f in r["facts"])
+    print(f"  facts={r['facts']}")
+    print(f"  flags={[f['kind'] for f in r['flags']]}")
+
     print("== within tolerance ==")
     db, athlete = fresh()
     db.upsert_plan_row(plan_row())

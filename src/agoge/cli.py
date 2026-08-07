@@ -266,6 +266,12 @@ def cmd_today(args):
         })
 
 
+def cmd_telegram(args):
+    """Long-poll Telegram and route messages to the existing CLI commands."""
+    from .telegram_bot import run as run_telegram
+    run_telegram()
+
+
 def cmd_plan(args):
     from .plan_import import import_plan, revision_context
     db, athlete = _ctx()
@@ -397,6 +403,8 @@ def main(argv=None):
 
     s = add("fitness", cmd_fitness, help="Long-horizon fitness trend (not daily readiness)")
     s.add_argument("--json", action="store_true")
+
+    add("telegram", cmd_telegram, help="Run the Telegram bot (long-poll)")
 
     args = p.parse_args(argv)
     try:

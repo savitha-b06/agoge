@@ -370,7 +370,9 @@ def _compose_reply(
         numbered = " ".join(
             f"({i}) {line.rstrip('.')}" for i, line in enumerate(session_lines, 1)
         )
-        head = f"Two-a-day: {numbered}."
+        n = len(session_lines)
+        label = {2: "Two-a-day", 3: "Three-a-day"}.get(n, f"{n} sessions")
+        head = f"{label}: {numbered}."
 
     if override and override["reason"] == "readiness_amber":
         head = head.rstrip(".") + ". Readiness amber — take the easy end, stop if anything sharpens."

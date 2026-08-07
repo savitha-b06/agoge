@@ -1,0 +1,4 @@
+date,week_of_block,sport,session_type,planned_duration_min,target_hr_low,target_hr_high,segments,lift_focus,notes
+2026-08-11,2,bike,endurance,60,,,,,"AM bike — baseline, no HR target yet"
+2026-08-11,2,run,endurance,40,,,,,"Midday run — baseline"
+2026-08-11,2,swim,endurance,45,,,,,"PM swim — baseline"

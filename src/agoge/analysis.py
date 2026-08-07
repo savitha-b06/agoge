@@ -82,19 +82,30 @@ def readiness(db: DB, athlete: Athlete, day: str) -> dict[str, Any]:
 
     score = max(0, min(100, score))
     flag = "green" if score >= 75 else "amber" if score >= 50 else "red"
+    gap = gap_check(db, date.fromisoformat(day))
     return {
         "score": score,
         "flag": flag,
         "reasons": reasons,
         "injury_flags": flags,
-        "guidance": _guidance(flag, flags),
+        "guidance": _guidance(flag, flags, gap),
     }
 
 
-def _guidance(flag: str, flags: list[dict[str, Any]]) -> str:
+def _guidance(flag: str, flags: list[dict[str, Any]],
+              gap: dict[str, Any] | None = None) -> str:
     if any(f["severity"] == "red" for f in flags):
         return ("Injury gate is open. No running today. Swim, easy spin, or rest. "
                 "If this is the second day, that is a physio conversation, not a training one.")
+    # Same miss-rule plan_today applies as a volume cut: do not say "as planned"
+    # while consistency is telling you to come back at 70%.
+    if (
+        gap
+        and gap.get("gap_days") is not None
+        and gap["gap_days"] >= 3
+        and flag in ("green", "amber")
+    ):
+        return gap["action"]
     return {
         "green": "Train the session as planned.",
         "amber": "Train, but take the easy end of the range and stop if anything sharpens.",
@@ -181,10 +192,11 @@ def gap_check(db: DB, today: date | None = None) -> dict[str, Any]:
 def plan_adherence(db: DB, athlete: Athlete, day: str) -> dict[str, Any]:
     """Compare each of today's plan rows against the matching COROS session by sport.
 
-    Two-a-days are checked independently: a planned swim matches the swim
-    session, a planned lift matches the strength session. Only fires when a
-    session was actually logged for that sport. Skips rest rows and rows with
-    populated segments. Missed-session detection lives elsewhere.
+    Two-a-days and three-a-days are checked independently: a planned swim
+    matches the swim session, a planned lift matches the strength session.
+    Only fires when a session was actually logged for that sport. Skips rest
+    rows and rows with populated segments. Missed-session detection lives
+    elsewhere.
     """
     cfg = athlete.raw.get("adherence") or {}
     hr_tol = float(cfg.get("hr_tolerance_bpm", 8))
@@ -276,7 +288,9 @@ def _adhere_one_plan(plan, logged, used_session_ids: set[int],
 
     lo, hi = plan["target_hr_low"], plan["target_hr_high"]
     avg_hr = session["avg_hr"]
-    # HR band only when the plan specifies one (typical for endurance).
+    # HR band only when the plan specifies both bounds (typical for endurance).
+    # Blank target_hr_low/high (baseline collection weeks) skips HR entirely —
+    # do not compare against None. Duration checking still runs below.
     if avg_hr is not None and lo is not None and hi is not None:
         if avg_hr < lo:
             hr_delta = lo - avg_hr

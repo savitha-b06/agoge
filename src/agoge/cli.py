@@ -109,9 +109,16 @@ def cmd_nightly(args):
 
 
 def cmd_weekly(args):
+    from .analysis import format_weekly_progression, weekly_progression
     from .weekly import run
+    day = _day(args.date) if args.date else None
+    if args.progression_only:
+        db, athlete = _ctx()
+        prog = weekly_progression(db, athlete, day or date.today())
+        console.print(format_weekly_progression(prog))
+        return
     out = run(
-        _day(args.date) if args.date else None,
+        day,
         rebuild_profile=not args.no_profile,
         force_biweekly=args.biweekly,
     )
@@ -345,6 +352,8 @@ def main(argv=None):
     s.add_argument("--no-profile", action="store_true")
     s.add_argument("--biweekly", action="store_true",
                    help="Also run the biweekly deep review (auto on every other Sunday)")
+    s.add_argument("--progression-only", action="store_true",
+                   help="Print week-over-week progression numbers, skip the LLM")
 
     s = add("biweekly", cmd_biweekly,
             help="Biweekly deep review (14d vs prior 14d); normally auto from weekly")

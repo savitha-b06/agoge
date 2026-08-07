@@ -143,16 +143,19 @@ def load_check(db: DB, athlete: Athlete, today: date | None = None) -> dict[str,
     prev_start, prev_end = week_bounds(today - timedelta(days=7))
     this_min = db.weekly_minutes(this_start, this_end)
     prev_min = db.weekly_minutes(prev_start, prev_end)
-    cap = prev_min * (1 + athlete.max_ramp_pct / 100) if prev_min else None
+    # Round before compare — 100 * 1.15 is 114.999… in float, which would
+    # falsely breach a clean +15% week.
+    cap = round(prev_min * (1 + athlete.max_ramp_pct / 100), 1) if prev_min else None
+    this_r, prev_r = round(this_min, 1), round(prev_min, 1)
     pct = (100 * (this_min - prev_min) / prev_min) if prev_min else None
     return {
         "week_start": this_start,
-        "this_week_min": round(this_min, 1),
-        "last_week_min": round(prev_min, 1),
+        "this_week_min": this_r,
+        "last_week_min": prev_r,
         "change_pct": round(pct, 1) if pct is not None else None,
-        "cap_min": round(cap, 1) if cap else None,
-        "headroom_min": round(cap - this_min, 1) if cap else None,
-        "breach": bool(cap and this_min > cap),
+        "cap_min": cap,
+        "headroom_min": round(cap - this_r, 1) if cap else None,
+        "breach": bool(cap is not None and this_r > cap),
     }
 
 
@@ -535,6 +538,360 @@ def sleep_regularity(db: DB, day: str, window: int = 14) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- plan vs reality
 
+def planned_week_minutes(db: DB, start: str, end: str) -> float:
+    """Sum prescribed minutes from the plan table (rest rows excluded)."""
+    rows = db.plan_between(start, end)
+    return float(sum(
+        (r["planned_min"] or 0) for r in rows
+        if (r["session_type"] or "").lower() != "rest"
+        and (r["sport"] or "").lower() != "rest"
+    ))
+
+
+def overtraining_signs(db: DB, athlete: Athlete, today: date | None = None) -> dict[str, Any]:
+    """Count this week's warning signs from the athlete's documented list.
+
+    Signs we can detect from stored data (Phase 3 will flesh this out):
+    elevated resting HR, degrading sleep, suppressed HRV, unresolved soreness.
+    'Dreading sessions' is logged only if an event of that kind exists.
+    """
+    today = today or date.today()
+    start, end = week_bounds(today)
+    daily = db.daily_between(start, end)
+    signs: list[str] = []
+
+    rhr_base = db.baseline("resting_hr", today.isoformat())
+    elev_days = 0
+    if rhr_base:
+        for d in daily:
+            if d["resting_hr"] is not None and d["resting_hr"] - rhr_base >= 7:
+                elev_days += 1
+        if elev_days >= 1:
+            signs.append(f"elevated resting HR (+7 vs baseline) on {elev_days} day(s)")
+
+    sleep_vals = [d["sleep_hours"] for d in daily if d["sleep_hours"] is not None]
+    if sleep_vals:
+        poor = sum(1 for v in sleep_vals if v < 5.5)
+        mean = sum(sleep_vals) / len(sleep_vals)
+        if poor >= 2 or mean < 6.0:
+            signs.append(f"degrading sleep (mean {mean:.1f}h, {poor} night(s) <5.5h)")
+
+    hrv_base = db.baseline("hrv", today.isoformat())
+    if hrv_base:
+        low = [d for d in daily if d["hrv"] is not None and d["hrv"] < hrv_base * 0.85]
+        if len(low) >= 2:
+            signs.append(f"suppressed HRV on {len(low)} day(s)")
+
+    syms = db.recent_symptoms(start)
+    sore = [s for s in syms if s["day"] <= end and (
+        (s["severity"] or 0) >= 3 or s["overnight"] == 1
+    )]
+    if sore:
+        signs.append(f"soreness/symptoms logged on {len({s['day'] for s in sore})} day(s)")
+
+    for e in db.recent_events(start):
+        if e["day"] > end:
+            continue
+        kind = (e["kind"] or "").lower()
+        detail = (e["detail"] or "").lower()
+        if "dread" in kind or "dread" in detail:
+            signs.append("dreading sessions logged")
+            break
+
+    return {"week_start": start, "signs": signs, "count": len(signs)}
+
+
+def red_light_signals(db: DB, athlete: Athlete, today: date | None = None) -> dict[str, Any]:
+    """Hard stop / hold-back conditions for progression judgment."""
+    today = today or date.today()
+    day = today.isoformat()
+    start, end = week_bounds(today)
+    reasons: list[str] = []
+
+    for f in injury_flags(db, athlete, day):
+        if f["severity"] == "red":
+            reasons.append(f["message"])
+        elif f["severity"] == "amber" and "overnight" in f["message"].lower():
+            reasons.append(f["message"] + " (effusion past 24h)")
+
+    # Ankle events escalate immediately per athlete rules
+    for e in db.recent_events(start):
+        if e["day"] > end:
+            continue
+        blob = f"{e['kind']} {e['detail'] or ''}".lower()
+        if "ankle" in blob or "roll" in blob or "giving-way" in blob or "gave way" in blob:
+            reasons.append(f"ankle event {e['day']}: {e['kind']} — {e['detail'] or ''}".strip())
+
+    rhr_base = db.baseline("resting_hr", day)
+    if rhr_base:
+        elev = [
+            d for d in db.daily_between(start, end)
+            if d["resting_hr"] is not None and d["resting_hr"] - rhr_base >= 7
+        ]
+        if len(elev) >= 2:
+            reasons.append(
+                f"resting HR +7 bpm or more on {len(elev)} days this week "
+                f"(baseline {rhr_base:.0f})"
+            )
+
+    ot = overtraining_signs(db, athlete, today)
+    if ot["count"] >= 3:
+        reasons.append(
+            f"{ot['count']} overtraining signs this week: " + "; ".join(ot["signs"])
+        )
+
+    return {"active": bool(reasons), "reasons": reasons}
+
+
+def green_light_signals(db: DB, athlete: Athlete, today: date | None = None) -> dict[str, Any]:
+    """Conditions under which pushing slightly ahead of the plan ramp is reasonable."""
+    today = today or date.today()
+    notes: list[str] = []
+
+    # Two consecutive positive benchmark weeks (faster than fixed baseline at ~same HR)
+    from .biweekly import _benchmark_comparison  # lazy — avoids import cycle at load
+    this_start, this_end = week_bounds(today)
+    prev_start, prev_end = week_bounds(today - timedelta(days=7))
+    b_this = _benchmark_comparison(
+        db, athlete, date.fromisoformat(this_start), date.fromisoformat(this_end)
+    )
+    b_prev = _benchmark_comparison(
+        db, athlete, date.fromisoformat(prev_start), date.fromisoformat(prev_end)
+    )
+    consecutive_bench = (
+        b_this.get("available") and b_this.get("match", {}).get("faster")
+        and b_prev.get("available") and b_prev.get("match", {}).get("faster")
+    )
+    if consecutive_bench:
+        notes.append(
+            f"two consecutive positive benchmarks "
+            f"({b_prev['match']['day']} and {b_this['match']['day']} faster than baseline)"
+        )
+
+    # Clean 2–3 week stretch: no red injury flags on the Sundays of those weeks
+    clean_weeks = 0
+    for back in range(3):
+        anchor = today - timedelta(days=7 * back)
+        flags = injury_flags(db, athlete, anchor.isoformat())
+        if any(f["severity"] == "red" for f in flags):
+            break
+        clean_weeks += 1
+    if clean_weeks >= 2:
+        notes.append(f"clean {clean_weeks}-week stretch (no red injury gate)")
+
+    # Stable recovery markers this week vs baseline
+    day = today.isoformat()
+    start, end = week_bounds(today)
+    daily = db.daily_between(start, end)
+    rhr_base = db.baseline("resting_hr", day)
+    hrv_base = db.baseline("hrv", day)
+    stable = True
+    if rhr_base:
+        rhrs = [d["resting_hr"] for d in daily if d["resting_hr"] is not None]
+        if rhrs and sum(rhrs) / len(rhrs) >= rhr_base + 4:
+            stable = False
+    if hrv_base:
+        hrvs = [d["hrv"] for d in daily if d["hrv"] is not None]
+        if hrvs and sum(hrvs) / len(hrvs) < hrv_base * 0.9:
+            stable = False
+    if stable and (rhr_base or hrv_base):
+        notes.append("stable recovery markers (RHR/HRV near baseline)")
+
+    active = consecutive_bench and clean_weeks >= 2 and stable
+    return {
+        "active": active,
+        "notes": notes,
+        "consecutive_benchmarks": bool(consecutive_bench),
+        "clean_weeks": clean_weeks,
+        "stable_recovery": stable,
+    }
+
+
+def weekly_progression(db: DB, athlete: Athlete, today: date | None = None) -> dict[str, Any]:
+    """Week-over-week progression: did volume increase like the plan intended?
+
+    Distinct from plan_adherence (today vs prescription) and load_check (15% cap).
+    Classifies: on_track | under_progressing | capped | holding.
+    Priority avoids contradictions: red-light holding > load-cap > under-progressing.
+    """
+    today = today or date.today()
+    this_start, this_end = week_bounds(today)
+    prev_start, prev_end = week_bounds(today - timedelta(days=7))
+    next_start_d = date.fromisoformat(this_end) + timedelta(days=1)
+    next_start, next_end = week_bounds(next_start_d)
+
+    actual_this = db.weekly_minutes(this_start, this_end)
+    actual_last = db.weekly_minutes(prev_start, prev_end)
+    planned_this = planned_week_minutes(db, this_start, this_end)
+    planned_last = planned_week_minutes(db, prev_start, prev_end)
+    planned_next = planned_week_minutes(db, next_start, next_end)
+
+    def _delta_pct(curr: float, prev: float) -> float | None:
+        if not prev:
+            return None
+        return round(100 * (curr - prev) / prev, 1)
+
+    actual_delta = _delta_pct(actual_this, actual_last)
+    planned_delta = _delta_pct(planned_this, planned_last)
+    next_vs_actual = _delta_pct(planned_next, actual_this)
+
+    # Band: within 5 percentage points of the plan's own week-over-week change.
+    band_pp = float(athlete.raw.get("load", {}).get("progression_band_pp", 5))
+    load = load_check(db, athlete, today)
+    red = red_light_signals(db, athlete, today)
+    green = green_light_signals(db, athlete, today)
+
+    plan_wants_growth = planned_delta is not None and planned_delta > 2
+    actual_flat_or_down = actual_delta is not None and actual_delta <= 2
+    meaningfully_below = (
+        actual_delta is not None and planned_delta is not None
+        and actual_delta < planned_delta - band_pp
+    )
+    within_band = (
+        actual_delta is not None and planned_delta is not None
+        and abs(actual_delta - planned_delta) <= band_pp
+    )
+    ahead = (
+        actual_delta is not None and planned_delta is not None
+        and actual_delta > planned_delta + band_pp
+    )
+
+    # Classification — order matters; never contradict.
+    if red["active"]:
+        status = "holding"
+        message = (
+            "Correctly holding back — red-light conditions present. "
+            "Hold or reduce until clear; this is not a missed progression week. "
+            + "; ".join(red["reasons"])
+        )
+    elif load["breach"]:
+        status = "capped"
+        message = (
+            f"Load ramp already breached "
+            f"({load['this_week_min']:.0f} min > cap {load['cap_min']:.0f}). "
+            f"Progression is capped by the existing guard — the real problem is already flagged."
+        )
+    elif plan_wants_growth and (actual_flat_or_down or meaningfully_below):
+        status = "under_progressing"
+        message = (
+            f"Under-progressing: plan called for "
+            f"{planned_delta:+.0f}% week-over-week "
+            f"({planned_last:.0f} → {planned_this:.0f} min), "
+            f"actual was "
+            f"{'n/a' if actual_delta is None else f'{actual_delta:+.0f}%'} "
+            f"({actual_last:.0f} → {actual_this:.0f} min)."
+        )
+    elif within_band or (planned_delta is None and actual_delta is not None and actual_delta > -band_pp):
+        status = "on_track"
+        message = (
+            f"On track: actual "
+            f"{'n/a' if actual_delta is None else f'{actual_delta:+.0f}%'} "
+            f"vs planned "
+            f"{'n/a' if planned_delta is None else f'{planned_delta:+.0f}%'} "
+            f"(band ±{band_pp:.0f} pp)."
+        )
+        if green["active"] and ahead:
+            message += (
+                " Green-light conditions present — pushing slightly ahead of the "
+                "plan's built-in ramp is reasonable. " + "; ".join(green["notes"])
+            )
+        elif green["active"]:
+            message += " Green-light: " + "; ".join(green["notes"]) + "."
+    elif ahead:
+        status = "on_track"
+        message = (
+            f"Ahead of plan ramp (actual {actual_delta:+.0f}% vs planned "
+            f"{planned_delta:+.0f}%)."
+        )
+        if green["active"]:
+            message += (
+                " Green-light conditions support this — reasonable. "
+                + "; ".join(green["notes"])
+            )
+        else:
+            message += " No green-light confirmation — watch recovery; do not keep overshooting."
+    else:
+        status = "on_track"
+        message = (
+            f"Insufficient plan history to score the band; "
+            f"actual {actual_last:.0f} → {actual_this:.0f} min "
+            f"({('n/a' if actual_delta is None else f'{actual_delta:+.0f}%')})."
+        )
+
+    next_week = {
+        "week_start": next_start,
+        "week_end": next_end,
+        "planned_min": round(planned_next, 1),
+        "vs_this_week_actual_pct": next_vs_actual,
+        "this_week_actual_min": round(actual_this, 1),
+        "statement": (
+            f"Next week target (from plan table): {planned_next:.0f} min"
+            + (
+                f" — {next_vs_actual:+.0f}% vs this week's actual {actual_this:.0f} min"
+                if next_vs_actual is not None
+                else f" — this week's actual {actual_this:.0f} min (no % without a prior total)"
+            )
+            if planned_next > 0
+            else "Next week target: no imported plan rows for next week."
+        ),
+    }
+
+    return {
+        "as_of": today.isoformat(),
+        "this_week": {
+            "start": this_start, "end": this_end,
+            "actual_min": round(actual_this, 1),
+            "planned_min": round(planned_this, 1),
+        },
+        "last_week": {
+            "start": prev_start, "end": prev_end,
+            "actual_min": round(actual_last, 1),
+            "planned_min": round(planned_last, 1),
+        },
+        "actual_delta_pct": actual_delta,
+        "planned_delta_pct": planned_delta,
+        "band_pp": band_pp,
+        "status": status,
+        "message": message,
+        "red_light": red,
+        "green_light": green,
+        "load": {
+            "breach": load["breach"],
+            "cap_min": load["cap_min"],
+            "this_week_min": load["this_week_min"],
+        },
+        "next_week": next_week,
+    }
+
+
+def format_weekly_progression(prog: dict[str, Any]) -> str:
+    """Plain-text progression block for --progression-only and weekly context."""
+    tw, lw = prog["this_week"], prog["last_week"]
+    lines = [
+        "WEEK-OVER-WEEK PROGRESSION (deterministic — not LLM):",
+        f"  Actual:  {lw['actual_min']:.0f} → {tw['actual_min']:.0f} min "
+        f"({_fmt_pct(prog['actual_delta_pct'])})",
+        f"  Planned: {lw['planned_min']:.0f} → {tw['planned_min']:.0f} min "
+        f"({_fmt_pct(prog['planned_delta_pct'])})",
+        f"  Status:  {prog['status']}",
+        f"  {prog['message']}",
+    ]
+    if prog["red_light"]["active"]:
+        lines.append("  Red-light:")
+        for r in prog["red_light"]["reasons"]:
+            lines.append(f"    · {r}")
+    if prog["green_light"]["notes"]:
+        lines.append("  Green-light notes:")
+        for n in prog["green_light"]["notes"]:
+            lines.append(f"    · {n}")
+    lines.append(f"  {prog['next_week']['statement']}")
+    return "\n".join(lines)
+
+
+def _fmt_pct(v: float | None) -> str:
+    return "n/a" if v is None else f"{v:+.0f}%"
+
+
 def plan_divergence(db: DB, athlete: Athlete, today: date | None = None,
                     weeks: int = 4) -> dict[str, Any]:
     """Sustained gap between planned and completed volume, week over week.
@@ -547,10 +904,7 @@ def plan_divergence(db: DB, athlete: Athlete, today: date | None = None,
     for back in range(weeks - 1, -1, -1):
         anchor = today - timedelta(days=7 * back)
         start, end = week_bounds(anchor)
-        planned_rows = db.plan_between(start, end)
-        planned = sum((r["planned_min"] or 0) for r in planned_rows
-                      if (r["session_type"] or "").lower() != "rest"
-                      and (r["sport"] or "").lower() != "rest")
+        planned = planned_week_minutes(db, start, end)
         actual = db.weekly_minutes(start, end)
         pct = (100 * actual / planned) if planned else None
         series.append({

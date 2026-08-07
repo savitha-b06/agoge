@@ -8,8 +8,9 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from .analysis import (checkpoint_status, gap_check, injury_flags, load_check,
-                       plan_divergence, race_status, week_bounds)
+from .analysis import (checkpoint_status, format_weekly_progression, gap_check,
+                       injury_flags, load_check, plan_divergence, race_status,
+                       week_bounds, weekly_progression)
 from .biweekly import is_biweekly_deep_review_day, run as run_biweekly
 from .config import Athlete, settings
 from .db import DB
@@ -24,12 +25,22 @@ def run(today: date | None = None, rebuild_profile: bool = True,
     athlete = Athlete.load(settings.athlete_file)
     db = DB(settings.db_path)
 
-    ctx = _weekly_context(db, athlete, today)
+    prog = weekly_progression(db, athlete, today)
+    ctx = _weekly_context(db, athlete, today, prog=prog)
     body = complete(system=load_prompt("weekly"), user=ctx,
                     model=settings.model_smart, max_tokens=2000)
     db.add_note(today.isoformat(), "weekly", body, settings.model_smart)
 
-    out: dict[str, Any] = {"report": body, "context": ctx}
+    # Deterministic next-week target and progression — never restated by the LLM.
+    prog_block = format_weekly_progression(prog)
+    report = body.rstrip() + "\n\n" + prog_block
+
+    out: dict[str, Any] = {
+        "report": report,
+        "context": ctx,
+        "progression": prog,
+        "progression_text": prog_block,
+    }
     if rebuild_profile:
         out["profile"] = update_profile(db, athlete, today)
 
@@ -41,11 +52,13 @@ def run(today: date | None = None, rebuild_profile: bool = True,
     return out
 
 
-def _weekly_context(db: DB, athlete: Athlete, today: date) -> str:
+def _weekly_context(db: DB, athlete: Athlete, today: date,
+                    prog: dict[str, Any] | None = None) -> str:
     this_start, this_end = week_bounds(today)
     prev_start, prev_end = week_bounds(today - timedelta(days=7))
     load = load_check(db, athlete, today)
     race = race_status(db, athlete, today)
+    prog = prog or weekly_progression(db, athlete, today)
 
     lines = [
         f"Sunday review for week of {this_start}.",
@@ -58,6 +71,12 @@ def _weekly_context(db: DB, athlete: Athlete, today: date) -> str:
         f"  Max ramp: {athlete.max_ramp_pct}% per week",
         f"  Next week must not exceed: "
         f"{load['this_week_min'] * (1 + athlete.max_ramp_pct / 100):.0f} min total",
+        "",
+        format_weekly_progression(prog),
+        "",
+        "NEXT WEEK TARGET is already stated above from the plan table. "
+        "In your Week ahead, respect that total and the load cap. "
+        "Do not invent a different weekly minute total.",
         "",
     ]
 

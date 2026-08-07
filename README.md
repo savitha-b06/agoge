@@ -57,6 +57,7 @@ On a VPS: `ssh root@IP 'bash -s' < deploy/setup_vps.sh`, then install
 | `agoge log "..."` | Log anything in plain English — symptoms, weight, prehab, sleep |
 | `agoge nightly` | Pull yesterday from COROS, score it, write the daily note |
 | `agoge weekly` | Sunday review, next week's plan, rebuild the profile (biweekly deep review auto every other Sunday) |
+| `agoge weekly --progression-only` | Week-over-week progression numbers (actual vs planned ramp); no LLM |
 | `agoge biweekly` | Force the 14d-vs-14d deep review; `--metrics-only` skips the LLM |
 | `agoge plan import --file plan.csv --from 2026-08-12 --reason "..."` | Bulk-import a training plan (CSV/xlsx); only future rows overwritten |
 | `agoge plan show` | Upcoming prescribed sessions |
